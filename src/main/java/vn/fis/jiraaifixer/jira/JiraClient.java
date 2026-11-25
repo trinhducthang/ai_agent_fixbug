@@ -8,7 +8,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -19,10 +18,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
-import vn.fis.jiraaifixer.config.AppProperties;
 import vn.fis.jiraaifixer.jira.JiraModels.Attachment;
 import vn.fis.jiraaifixer.jira.JiraModels.Comment;
 import vn.fis.jiraaifixer.jira.JiraModels.IssueDetail;
@@ -30,38 +29,38 @@ import vn.fis.jiraaifixer.jira.JiraModels.IssueSummary;
 import vn.fis.jiraaifixer.jira.JiraModels.JiraUser;
 import vn.fis.jiraaifixer.util.Texts;
 
-/** Client REST cho Jira Server 6.4 (/rest/api/2). Không có PAT nên dùng cookie phiên hoặc Basic auth. */
+/**
+ * Client REST cho Jira Server (/rest/api/2). Mọi lời gọi nhận {@link JiraSettings} của profile tương ứng,
+ * nên có thể làm việc với nhiều Jira khác nhau. Xác thực bằng cookie phiên hoặc Basic auth.
+ */
 @Component
 public class JiraClient {
 
     private static final Pattern ISSUE_KEY = Pattern.compile("[A-Z][A-Z0-9_]+-\\d+");
+    private static final Pattern PROJECT_KEY = Pattern.compile("[A-Z][A-Z0-9_]{0,63}");
+    private static final Pattern CUSTOM_FIELD = Pattern.compile("customfield_\\d+");
     private static final Pattern CURL_COOKIE = Pattern.compile("(?:-b|--cookie)\\s+(['\"])(.*?)\\1", Pattern.DOTALL);
     private static final Pattern COOKIE_HEADER = Pattern.compile("(?i)cookie:\\s*([^'\"\\r\\n]+)");
-    private static final Pattern CUSTOM_FIELD = Pattern.compile("customfield_\\d+");
     private static final String SEARCH_FIELDS = "project,summary,status,issuetype,priority,reporter,updated,duedate,"
             + "components,labels";
     private static final String DETAIL_FIELDS = "project,summary,description,environment,status,issuetype,priority,"
             + "reporter,assignee,created,updated,duedate,comment,attachment,components,labels";
+    private static final int MAX_RESULTS = 100;
 
-    private final AppProperties.Jira cfg;
+    public record ServerInfo(String baseUrl, String version, String title) {
+    }
+
+    public record ProjectInfo(String key, String name, int components) {
+    }
+
+    public record FieldInfo(String id, String name) {
+    }
+
     private final ObjectMapper json;
-    private final RestClient http;
-    private final AtomicReference<String> sessionCookie;
-    private final String moduleField;
+    private final RestClient http = RestClient.builder().build();
 
-    public JiraClient(AppProperties props, ObjectMapper json) {
-        this.cfg = props.jira();
+    public JiraClient(ObjectMapper json) {
         this.json = json;
-        this.moduleField = cfg.moduleField() != null && CUSTOM_FIELD.matcher(cfg.moduleField()).matches()
-                ? cfg.moduleField() : null;
-        this.sessionCookie = new AtomicReference<>(normalizeCookie(cfg.cookie()));
-        this.http = RestClient.builder()
-                .baseUrl(cfg.baseUrl())
-                .requestInterceptor((request, body, execution) -> {
-                    applyAuth(request.getHeaders());
-                    return execution.execute(request, body);
-                })
-                .build();
     }
 
     public static void requireKey(String key) {
@@ -70,54 +69,182 @@ public class JiraClient {
         }
     }
 
-    public String authMode() {
-        if (sessionCookie.get() != null) {
-            return "cookie";
-        }
-        return hasBasicAuth() ? "basic" : "none";
+    public static String browseUrl(JiraSettings s, String key) {
+        return s.baseUrl() + "/browse/" + key;
     }
 
-    public void updateCookie(String raw) {
-        sessionCookie.set(normalizeCookie(raw));
+    /** Thông tin server – gọi được cả khi chưa đăng nhập. */
+    public ServerInfo serverInfo(JiraSettings s) {
+        JsonNode n = getJson(s, "/rest/api/2/serverInfo", Map.of(), false);
+        return new ServerInfo(text(n, "baseUrl"), text(n, "version"), text(n, "serverTitle"));
     }
 
-    public String browseUrl(String key) {
-        return cfg.baseUrl() + "/browse/" + key;
-    }
-
-    public JiraUser myself() {
-        JsonNode n = getJson("/rest/api/2/myself", Map.of());
+    public JiraUser myself(JiraSettings s) {
+        JsonNode n = getJson(s, "/rest/api/2/myself", Map.of(), true);
         return new JiraUser(text(n, "name"), text(n, "displayName"));
     }
 
-    public List<IssueSummary> search(String jql) {
-        String query = isBlank(jql) ? cfg.defaultJql() : jql.trim();
-        JsonNode n = getJson("/rest/api/2/search", Map.of(
+    public ProjectInfo project(JiraSettings s, String key) {
+        if (key == null || !PROJECT_KEY.matcher(key).matches()) {
+            throw new IllegalArgumentException("Mã project không hợp lệ: " + key);
+        }
+        JsonNode n = getJson(s, "/rest/api/2/project/" + key, Map.of(), true);
+        return new ProjectInfo(text(n, "key"), text(n, "name"), n.path("components").size());
+    }
+
+    public List<FieldInfo> fields(JiraSettings s) {
+        List<FieldInfo> out = new ArrayList<>();
+        for (JsonNode f : getJson(s, "/rest/api/2/field", Map.of(), true)) {
+            out.add(new FieldInfo(text(f, "id"), text(f, "name")));
+        }
+        return out;
+    }
+
+    public List<String> statuses(JiraSettings s) {
+        List<String> out = new ArrayList<>();
+        for (JsonNode st : getJson(s, "/rest/api/2/status", Map.of(), true)) {
+            out.add(text(st, "name"));
+        }
+        return out;
+    }
+
+    /** @return null nếu JQL hợp lệ trên Jira này, ngược lại là thông báo lỗi của Jira. */
+    public String jqlError(JiraSettings s, String jql) {
+        try {
+            getJson(s, "/rest/api/2/search", Map.of("jql", jql, "maxResults", "0", "fields", "key"), true);
+            return null;
+        } catch (JiraException e) {
+            return e.getMessage();
+        }
+    }
+
+    public List<IssueSummary> search(JiraSettings s, String jql) {
+        String query = isBlank(jql) ? s.defaultJql() : jql.trim();
+        if (isBlank(query)) {
+            throw new IllegalArgumentException("Chưa có JQL (cấu hình JQL mặc định trong profile)");
+        }
+        JsonNode n = getJson(s, "/rest/api/2/search", Map.of(
                 "jql", query,
-                "maxResults", String.valueOf(cfg.maxResults()),
-                "fields", withModule(SEARCH_FIELDS)));
+                "maxResults", String.valueOf(MAX_RESULTS),
+                "fields", withModule(s, SEARCH_FIELDS)), true);
         List<IssueSummary> out = new ArrayList<>();
         for (JsonNode i : n.path("issues")) {
             JsonNode f = i.path("fields");
             String key = text(i, "key");
             out.add(new IssueSummary(key, text(f, "project", "key"), text(f, "summary"), text(f, "issuetype", "name"),
                     text(f, "status", "name"), text(f, "priority", "name"), text(f, "reporter", "displayName"),
-                    text(f, "updated"), text(f, "duedate"), module(f), names(f.path("components")),
-                    strings(f.path("labels")), browseUrl(key)));
+                    text(f, "updated"), text(f, "duedate"), module(s, f), names(f.path("components")),
+                    strings(f.path("labels")), browseUrl(s, key)));
         }
         return out;
     }
 
-    private String withModule(String fields) {
-        return moduleField == null ? fields : fields + "," + moduleField;
+    public IssueDetail getIssue(JiraSettings s, String key) {
+        requireKey(key);
+        JsonNode n = getJson(s, "/rest/api/2/issue/" + key, Map.of("fields", withModule(s, DETAIL_FIELDS)), true);
+        JsonNode f = n.path("fields");
+
+        List<Comment> comments = new ArrayList<>();
+        for (JsonNode c : f.path("comment").path("comments")) {
+            comments.add(new Comment(text(c, "author", "displayName"), text(c, "created"), text(c, "body")));
+        }
+        List<Attachment> attachments = new ArrayList<>();
+        for (JsonNode a : f.path("attachment")) {
+            attachments.add(new Attachment(text(a, "filename"), text(a, "mimeType"), a.path("size").asLong(0),
+                    text(a, "content")));
+        }
+        return new IssueDetail(text(n, "key"), text(f, "project", "key"), text(f, "summary"),
+                text(f, "issuetype", "name"), text(f, "status", "name"), text(f, "priority", "name"),
+                text(f, "reporter", "displayName"), text(f, "assignee", "displayName"), text(f, "created"),
+                text(f, "updated"), text(f, "duedate"), module(s, f), text(f, "description"), text(f, "environment"),
+                names(f.path("components")), strings(f.path("labels")), comments, attachments, browseUrl(s, key));
+    }
+
+    /** Tải file đính kèm. Chỉ cho URL thuộc chính Jira đó để không gửi thông tin đăng nhập sang host khác. */
+    public byte[] download(JiraSettings s, String url) {
+        if (url == null || !url.startsWith(s.baseUrl() + "/")) {
+            throw new JiraException(400, "URL đính kèm không thuộc Jira: " + url);
+        }
+        try {
+            return http.get().uri(URI.create(url)).headers(h -> applyAuth(h, s)).accept(MediaType.ALL)
+                    .retrieve().body(byte[].class);
+        } catch (RestClientResponseException e) {
+            throw translate(e);
+        }
+    }
+
+    private JsonNode getJson(JiraSettings s, String path, Map<String, String> query, boolean requireLogin) {
+        if (isBlank(s.baseUrl()) || !s.baseUrl().matches("(?i)https?://.+")) {
+            throw new JiraException(400, "Chưa cấu hình địa chỉ Jira hợp lệ (http/https): " + s.baseUrl());
+        }
+        UriComponentsBuilder b = UriComponentsBuilder.fromUriString(s.baseUrl() + path);
+        query.keySet().forEach(k -> b.queryParam(k, "{" + k + "}"));
+        URI uri = b.encode().buildAndExpand(query).toUri();
+        ResponseEntity<String> res;
+        try {
+            res = http.get().uri(uri).headers(h -> applyAuth(h, s)).accept(MediaType.APPLICATION_JSON)
+                    .retrieve().toEntity(String.class);
+        } catch (RestClientResponseException e) {
+            throw translate(e);
+        } catch (ResourceAccessException e) {
+            throw new JiraException(502, "Không kết nối được Jira " + s.baseUrl() + ": " + e.getMessage());
+        }
+        if (requireLogin && "anonymous".equalsIgnoreCase(res.getHeaders().getFirst("X-AUSERNAME"))) {
+            throw new JiraException.Auth("Jira coi request là anonymous: chưa đăng nhập hoặc cookie phiên đã hết hạn.");
+        }
+        String body = res.getBody();
+        try {
+            return json.readTree(isBlank(body) ? "{}" : body);
+        } catch (RuntimeException e) {
+            throw new JiraException(502, "Jira trả về dữ liệu không phải JSON (sai địa chỉ Jira?): "
+                    + Texts.truncate(Texts.oneLine(body), 200));
+        }
+    }
+
+    private JiraException translate(RestClientResponseException e) {
+        int status = e.getStatusCode().value();
+        if (status == 401 || status == 403) {
+            return new JiraException.Auth("Jira từ chối xác thực (HTTP " + status
+                    + "). Kiểm tra tài khoản/mật khẩu hoặc cookie phiên của profile.");
+        }
+        String detail = e.getResponseBodyAsString();
+        try {
+            JsonNode n = json.readTree(detail);
+            List<String> msgs = new ArrayList<>();
+            n.path("errorMessages").forEach(m -> msgs.add(m.asString()));
+            n.path("errors").properties().forEach(en -> msgs.add(en.getKey() + ": " + en.getValue().asString()));
+            if (!msgs.isEmpty()) {
+                detail = String.join("; ", msgs);
+            }
+        } catch (RuntimeException ignored) {
+            detail = Texts.truncate(Texts.oneLine(detail), 300);
+        }
+        return new JiraException(status == 404 ? 404 : 502, "Jira trả lỗi HTTP " + status + ": " + detail);
+    }
+
+    private static void applyAuth(HttpHeaders headers, JiraSettings s) {
+        if (!isBlank(s.cookie())) {
+            headers.set(HttpHeaders.COOKIE, s.cookie());
+        } else if (s.hasBasicAuth()) {
+            headers.setBasicAuth(s.username(), s.password(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static String withModule(JiraSettings s, String fields) {
+        return validModuleField(s) == null ? fields : fields + "," + s.moduleField();
+    }
+
+    private static String validModuleField(JiraSettings s) {
+        return s.moduleField() != null && CUSTOM_FIELD.matcher(s.moduleField()).matches() ? s.moduleField() : null;
     }
 
     /** Field "Module" có thể là chuỗi, option {value} hoặc mảng option tùy plugin. */
-    private String module(JsonNode fields) {
-        if (moduleField == null) {
+    private static String module(JiraSettings s, JsonNode fields) {
+        String field = validModuleField(s);
+        if (field == null) {
             return null;
         }
-        JsonNode m = fields.path(moduleField);
+        JsonNode m = fields.path(field);
         if (m.isMissingNode() || m.isNull()) {
             return null;
         }
@@ -146,99 +273,8 @@ public class JiraClient {
         return out;
     }
 
-    public IssueDetail getIssue(String key) {
-        requireKey(key);
-        JsonNode n = getJson("/rest/api/2/issue/" + key, Map.of("fields", withModule(DETAIL_FIELDS)));
-        JsonNode f = n.path("fields");
-
-        List<Comment> comments = new ArrayList<>();
-        for (JsonNode c : f.path("comment").path("comments")) {
-            comments.add(new Comment(text(c, "author", "displayName"), text(c, "created"), text(c, "body")));
-        }
-        List<Attachment> attachments = new ArrayList<>();
-        for (JsonNode a : f.path("attachment")) {
-            attachments.add(new Attachment(text(a, "filename"), text(a, "mimeType"), a.path("size").asLong(0),
-                    text(a, "content")));
-        }
-        return new IssueDetail(text(n, "key"), text(f, "project", "key"), text(f, "summary"),
-                text(f, "issuetype", "name"), text(f, "status", "name"), text(f, "priority", "name"),
-                text(f, "reporter", "displayName"), text(f, "assignee", "displayName"), text(f, "created"),
-                text(f, "updated"), text(f, "duedate"), module(f), text(f, "description"), text(f, "environment"),
-                names(f.path("components")), strings(f.path("labels")), comments, attachments, browseUrl(key));
-    }
-
-    /** Tải file đính kèm. Chỉ cho URL thuộc Jira để không gửi cookie/mật khẩu sang host khác. */
-    public byte[] download(String url) {
-        if (url == null || !url.startsWith(cfg.baseUrl() + "/")) {
-            throw new JiraException(400, "URL đính kèm không thuộc Jira: " + url);
-        }
-        try {
-            return http.get().uri(URI.create(url)).accept(MediaType.ALL).retrieve().body(byte[].class);
-        } catch (RestClientResponseException e) {
-            throw translate(e);
-        }
-    }
-
-    private JsonNode getJson(String path, Map<String, String> query) {
-        ResponseEntity<String> res;
-        try {
-            res = http.get()
-                    .uri(b -> {
-                        b.path(path);
-                        query.keySet().forEach(k -> b.queryParam(k, "{" + k + "}"));
-                        return b.build(query);
-                    })
-                    .accept(MediaType.APPLICATION_JSON)
-                    .retrieve()
-                    .toEntity(String.class);
-        } catch (RestClientResponseException e) {
-            throw translate(e);
-        } catch (ResourceAccessException e) {
-            throw new JiraException(502, "Không kết nối được Jira: " + e.getMessage());
-        }
-        if ("anonymous".equalsIgnoreCase(res.getHeaders().getFirst("X-AUSERNAME"))) {
-            throw new JiraException.Auth("Jira coi request là anonymous: cookie phiên đã hết hạn hoặc chưa cấu hình đăng nhập.");
-        }
-        String body = res.getBody();
-        return json.readTree(isBlank(body) ? "{}" : body);
-    }
-
-    private JiraException translate(RestClientResponseException e) {
-        int status = e.getStatusCode().value();
-        if (status == 401 || status == 403) {
-            return new JiraException.Auth("Jira từ chối xác thực (HTTP " + status
-                    + "). Cập nhật cookie phiên hoặc JIRA_USERNAME/JIRA_PASSWORD.");
-        }
-        String detail = e.getResponseBodyAsString();
-        try {
-            JsonNode n = json.readTree(detail);
-            List<String> msgs = new ArrayList<>();
-            n.path("errorMessages").forEach(m -> msgs.add(m.asString()));
-            n.path("errors").properties().forEach(en -> msgs.add(en.getKey() + ": " + en.getValue().asString()));
-            if (!msgs.isEmpty()) {
-                detail = String.join("; ", msgs);
-            }
-        } catch (RuntimeException ignored) {
-            detail = Texts.truncate(Texts.oneLine(detail), 300);
-        }
-        return new JiraException(status == 404 ? 404 : 502, "Jira trả lỗi HTTP " + status + ": " + detail);
-    }
-
-    private void applyAuth(HttpHeaders headers) {
-        String cookie = sessionCookie.get();
-        if (cookie != null) {
-            headers.set(HttpHeaders.COOKIE, cookie);
-        } else if (hasBasicAuth()) {
-            headers.setBasicAuth(cfg.username(), cfg.password(), StandardCharsets.UTF_8);
-        }
-    }
-
-    private boolean hasBasicAuth() {
-        return !isBlank(cfg.username()) && !isBlank(cfg.password());
-    }
-
     /** Nhận cookie dạng thô, header "Cookie: ...", hoặc nguyên lệnh curl có -b '...'. */
-    static String normalizeCookie(String raw) {
+    public static String normalizeCookie(String raw) {
         if (isBlank(raw)) {
             return null;
         }

@@ -6,8 +6,14 @@ import java.util.regex.Pattern;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+/**
+ * Cấu hình từ application.yml. {@code jira} và {@code projects} chỉ dùng để tạo profile mặc định ở lần chạy đầu;
+ * sau đó profile (module cấu hình dự án, lưu ở {@code dataDir}) là nguồn cấu hình chính.
+ *
+ * @param dataDir thư mục lưu profile (mặc định ~/.jira-ai-fixer, nằm ngoài project nên không bị commit)
+ */
 @ConfigurationProperties(prefix = "app")
-public record AppProperties(Jira jira, Claude claude, Workspace workspace, List<Project> projects) {
+public record AppProperties(Jira jira, Claude claude, Workspace workspace, List<Project> projects, String dataDir) {
 
     private static final Pattern SAFE_NAME = Pattern.compile("[A-Za-z0-9._-]{1,40}");
 

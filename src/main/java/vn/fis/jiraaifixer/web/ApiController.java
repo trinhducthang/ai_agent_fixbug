@@ -15,10 +15,14 @@ import org.springframework.web.bind.annotation.RestController;
 
 import vn.fis.jiraaifixer.claude.ClaudeCli;
 import vn.fis.jiraaifixer.config.AppProperties;
+import vn.fis.jiraaifixer.config.AppProperties.Project;
 import vn.fis.jiraaifixer.jira.JiraClient;
 import vn.fis.jiraaifixer.jira.JiraModels.IssueDetail;
 import vn.fis.jiraaifixer.jira.JiraModels.IssueSummary;
 import vn.fis.jiraaifixer.jira.JiraModels.JiraUser;
+import vn.fis.jiraaifixer.jira.JiraSettings;
+import vn.fis.jiraaifixer.profile.Profile;
+import vn.fis.jiraaifixer.profile.ProfileService;
 import vn.fis.jiraaifixer.task.FixTask.LogSlice;
 import vn.fis.jiraaifixer.task.FixTaskService;
 import vn.fis.jiraaifixer.task.FixTaskService.BatchItem;
@@ -38,8 +42,12 @@ public class ApiController {
     public record ProjectView(String name, String title, List<RepoConfigView> repos) {
     }
 
-    public record ConfigView(String jiraBaseUrl, String defaultJql, List<ProjectView> projects, String claudeCli,
-                             String defaultModel, boolean reviewEnabled, double maxBudgetUsd) {
+    public record ProfileOption(String id, String name) {
+    }
+
+    public record ConfigView(String profileId, String profileName, List<ProfileOption> profiles, String jiraBaseUrl,
+                             String defaultJql, List<ProjectView> projects, String claudeCli, String defaultModel,
+                             boolean reviewEnabled, double maxBudgetUsd) {
     }
 
     /** Issue kèm phần mềm được tự xác định ({@code route} null = không xác định). */
@@ -68,48 +76,57 @@ public class ApiController {
     private final ClaudeCli claude;
     private final FixTaskService tasks;
     private final ProjectRouter router;
+    private final ProfileService profiles;
 
     public ApiController(AppProperties props, JiraClient jira, ClaudeCli claude, FixTaskService tasks,
-                         ProjectRouter router) {
+                         ProjectRouter router, ProfileService profiles) {
         this.props = props;
         this.jira = jira;
         this.claude = claude;
         this.tasks = tasks;
         this.router = router;
+        this.profiles = profiles;
     }
 
     @GetMapping("/config")
     public ConfigView config() {
-        List<ProjectView> projects = props.projects().stream()
-                .map(p -> new ProjectView(p.name(), p.title(), p.repos().stream()
+        Profile p = profiles.active();
+        List<ProjectView> projects = p.projects().stream()
+                .map(x -> new ProjectView(x.name(), x.title(), x.repos().stream()
                         .map(r -> new RepoConfigView(r.name(), r.path(), r.targetBranch())).toList()))
                 .toList();
         String cli = claude.locate().map(Object::toString).orElse(null);
-        return new ConfigView(props.jira().baseUrl(), props.jira().defaultJql(), projects, cli,
-                Texts.nz(props.claude().model()), props.claude().reviewEnabled(), props.claude().maxBudgetUsd());
+        return new ConfigView(p.id(), p.name(),
+                profiles.list().stream().map(x -> new ProfileOption(x.id(), x.name())).toList(),
+                p.jiraBaseUrl(), p.defaultJql(), projects, cli, Texts.nz(props.claude().model()),
+                props.claude().reviewEnabled(), props.claude().maxBudgetUsd());
     }
 
     @GetMapping("/jira/me")
     public Map<String, String> me() {
-        JiraUser u = jira.myself();
-        return Map.of("name", Texts.nz(u.name()), "displayName", Texts.nz(u.displayName()), "authMode", jira.authMode());
+        JiraSettings s = profiles.activeJira();
+        JiraUser u = jira.myself(s);
+        return Map.of("name", Texts.nz(u.name()), "displayName", Texts.nz(u.displayName()), "authMode", s.authMode());
     }
 
+    /** Cookie phiên cho profile đang dùng (chỉ giữ trong bộ nhớ). */
     @PostMapping("/jira/cookie")
     public Map<String, String> updateCookie(@RequestBody CookieRequest req) {
-        jira.updateCookie(req.cookie());
+        profiles.setCookie(profiles.active().id(), req.cookie());
         return me();
     }
 
     @GetMapping("/issues")
     public List<IssueView> issues(@RequestParam(required = false) String jql) {
-        return jira.search(jql).stream().map(this::view).toList();
+        Profile p = profiles.active();
+        return jira.search(profiles.jira(p), jql).stream().map(i -> view(p.projects(), i)).toList();
     }
 
     @GetMapping("/issues/{key}")
     public IssueDetailView issue(@PathVariable String key) {
-        IssueDetail d = jira.getIssue(key);
-        Route r = router.route(d);
+        Profile p = profiles.active();
+        IssueDetail d = jira.getIssue(profiles.jira(p), key);
+        Route r = router.route(p.projects(), d);
         return new IssueDetailView(d, r.project(), r.reason());
     }
 
@@ -164,8 +181,8 @@ public class ApiController {
         return Map.of("message", "Đã xóa worktree và nhánh local của phiên " + id);
     }
 
-    private IssueView view(IssueSummary i) {
-        Route r = router.route(i);
+    private IssueView view(List<Project> projects, IssueSummary i) {
+        Route r = router.route(projects, i);
         return new IssueView(i.key(), i.projectKey(), i.summary(), i.type(), i.status(), i.priority(), i.reporter(),
                 i.updated(), i.dueDate(), i.module(), i.components(), r.project(), r.reason(), i.url());
     }

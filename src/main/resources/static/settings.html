@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cấu hình dự án</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <strong>Jira AI Fixer</strong>
+    <span class="muted">Cấu hình dự án – mỗi profile = một Jira + các repo source</span>
+  </div>
+  <div class="topbar-right">
+    <a class="btn small" href="/">← Về danh sách issue</a>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="col">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Profile</h2>
+        <div class="row">
+          <button id="btnNew" class="btn small primary" type="button">+ Profile mới</button>
+          <button id="btnImport" class="btn small ghost" type="button" title="Tạo profile từ application.yml">Nhập từ yml</button>
+        </div>
+      </div>
+      <div id="profileList" class="list"><div class="empty">Đang tải…</div></div>
+      <p class="muted small-note" id="dataDir"></p>
+    </div>
+  </section>
+
+  <section class="col">
+    <div id="editor" class="panel">
+      <div class="empty">Chọn profile để sửa, hoặc tạo profile mới.</div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="settings.js"></script>
+</body>
+</html>

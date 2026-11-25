@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.DoubleAdder;
 
 import vn.fis.jiraaifixer.config.AppProperties.Repo;
 import vn.fis.jiraaifixer.jira.JiraModels.IssueDetail;
+import vn.fis.jiraaifixer.jira.JiraSettings;
 
 /**
  * Một phiên xử lý issue: thư mục phiên chứa worktree của mọi repo thuộc phần mềm,
@@ -68,6 +69,10 @@ public final class FixTask {
     }
 
     private final String id;
+    private final String profileId;
+    private final String profileName;
+    /** Thông tin Jira của profile lúc tạo phiên – đổi profile giữa chừng không ảnh hưởng phiên đang chạy. */
+    private final JiraSettings jira;
     private final String issueKey;
     private final String projectName;
     private final String projectTitle;
@@ -93,9 +98,13 @@ public final class FixTask {
     private volatile boolean cancelRequested;
     private volatile Process process;
 
-    FixTask(String id, String issueKey, String projectName, String projectTitle, Path taskDir, List<RepoWork> repos,
-            List<Path> contextDirs, String model, String instruction) {
+    FixTask(String id, String profileId, String profileName, JiraSettings jira, String issueKey, String projectName,
+            String projectTitle, Path taskDir, List<RepoWork> repos, List<Path> contextDirs, String model,
+            String instruction) {
         this.id = id;
+        this.profileId = profileId;
+        this.profileName = profileName;
+        this.jira = jira;
         this.issueKey = issueKey;
         this.projectName = projectName;
         this.projectTitle = projectTitle;
@@ -169,6 +178,9 @@ public final class FixTask {
     }
 
     public String id() { return id; }
+    public String profileId() { return profileId; }
+    public String profileName() { return profileName; }
+    public JiraSettings jira() { return jira; }
     public String issueKey() { return issueKey; }
     public String projectName() { return projectName; }
     public String projectTitle() { return projectTitle; }

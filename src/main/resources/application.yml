@@ -11,6 +11,11 @@ spring:
     import: optional:file:./application-local.yml
 
 app:
+  # Nơi lưu profile (module "Cấu hình dự án"). Để trống = ~/.jira-ai-fixer (ngoài project, không bị commit).
+  data-dir: ${JIRA_AI_FIXER_DATA:}
+
+  # app.jira + app.projects bên dưới chỉ dùng để tạo profile mặc định ở lần chạy đầu.
+  # Sau đó cấu hình Jira/repo trên giao diện "Cấu hình dự án".
   jira:
     base-url: https://jira.fis.com.vn
     # Cách 1: user/password Jira (Basic auth) qua biến môi trường JIRA_USERNAME/JIRA_PASSWORD,

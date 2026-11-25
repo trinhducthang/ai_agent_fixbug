@@ -6,7 +6,8 @@ import java.util.Set;
 import vn.fis.jiraaifixer.task.FixTask;
 import vn.fis.jiraaifixer.task.TaskState;
 
-public record TaskView(String id, String issueKey, String issueSummary, String project, String projectTitle,
+public record TaskView(String id, String profileName, String issueKey, String issueSummary, String project,
+                       String projectTitle,
                        String taskDir, List<RepoView> repos, String model, String state, String stateLabel,
                        boolean busy, String error, List<String> warnings, List<String> attachments,
                        List<String> skippedAttachments, String coderSummary, String reviewSummary, double costUsd,
@@ -25,7 +26,7 @@ public record TaskView(String id, String issueKey, String issueSummary, String p
                 .map(r -> new RepoView(r.name(), r.branch(), r.targetBranch(), r.worktree().toString(), r.created(),
                         r.mrUrl(), r.mrCreated(), r.pushedHead() != null))
                 .toList();
-        return new TaskView(t.id(), t.issueKey(), t.issueSummary(), t.projectName(), t.projectTitle(),
+        return new TaskView(t.id(), t.profileName(), t.issueKey(), t.issueSummary(), t.projectName(), t.projectTitle(),
                 t.taskDir().toString(), repos, t.model(), s.name(), s.label(), s.busy(), t.error(), t.warnings(),
                 t.attachments().stream().map(p -> p.getFileName().toString()).toList(), t.skippedAttachments(),
                 t.coderSummary(),

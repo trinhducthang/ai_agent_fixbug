@@ -12,6 +12,42 @@
 6. Bấm **Commit, push & tạo MR**: app commit và push nhánh `bugfix/<KEY>`, rồi tạo merge request cho **từng repo có thay đổi**
    bằng GitLab push option.
 
+## Cấu hình dự án (profile) – đổi Jira / repo không cần sửa code
+
+Mở **Cấu hình dự án** (nút trên thanh đầu trang hoặc `/settings.html`). Mỗi profile gồm một Jira, tài khoản Jira
+và các repo source code. Muốn chuyển dự án, chọn profile ở ô **Dự án** trên trang chính.
+
+1. **Jira**: dán **link Jira bất kỳ** (trang chủ, link issue, link filter/board), nhập tài khoản và mật khẩu,
+   rồi bấm **Kiểm tra & tự nhận**. App tự làm:
+   - tách địa chỉ Jira (giữ cả context path, ví dụ `https://host/jira`) và mã project trong link;
+   - kiểm tra đăng nhập, đọc tên project;
+   - tìm custom field **Module**;
+   - tạo **JQL gợi ý** chỉ với các trạng thái Open/Reopened/In Progress mà Jira đó chấp nhận.
+2. **Source code**: nhập **thư mục chứa code local** và dán **link source**, mỗi dòng một link.
+   Link có thể là link web GitLab/GitHub (kể cả dạng `/-/tree/develop`), link clone, hoặc thư mục local
+   (một thư mục chứa nhiều repo cũng được). Bấm **Phân tích & tự map**, app tự làm:
+   - tìm bản clone sẵn có trong thư mục chứa code; repo chưa có thì hiện nút **Clone**;
+   - nhận vai trò repo theo file build: `pom.xml`/gradle là **be**, `package.json` là **fe**,
+     không có file build là **tài liệu tham khảo chỉ đọc**;
+   - chọn nhánh nhận MR theo thứ tự `develop` → `dev` → `main` → `master`;
+   - tạo lệnh kiểm tra build: maven, `npm run build`, hoặc `pnpm run typecheck`;
+   - tìm các thư mục `node_modules` dùng chung, kể cả trong monorepo `apps/*`, `packages/*`;
+   - gom repo thành phần mềm theo thư mục cha (hoặc group trên GitLab), bỏ các bản sao trùng remote;
+   - gắn Jira project vào phần mềm khi **tên group trên GitLab trùng mã Jira project**
+     (ví dụ `btp_gdbd_s7_2026_pm` ↔ `BTP_GDBD_S7_2026_PM`);
+   - nhiều phần mềm dùng chung một Jira project thì phân loại theo **từ khóa**; nên bổ sung các cụm từ
+     trong Module/tiêu đề, ví dụ "kiểm tra rà soát".
+3. Sửa lại các ô nếu cần, rồi bấm **Lưu & dùng profile này**.
+
+Profile lưu tại `~/.jira-ai-fixer/profiles.json` (đổi được bằng `app.data-dir`). Thư mục này nằm ngoài project
+nên không bị commit. Mật khẩu được mã hóa AES-GCM với khóa trong `~/.jira-ai-fixer/secret.key`: chống lộ khi lỡ
+chia sẻ file profile, nhưng không chống được người đã đăng nhập được vào tài khoản Windows của bạn.
+API không bao giờ trả mật khẩu ra ngoài. Để trống ô mật khẩu khi sửa profile nghĩa là giữ mật khẩu cũ.
+
+Lần chạy đầu tiên, app tạo profile **"Mặc định (application.yml)"** từ `app.jira` + `app.projects` trong yml
+(kèm `application-local.yml`). Sau đó profile là nguồn cấu hình chính; sửa yml không còn ảnh hưởng.
+Muốn tạo lại profile từ yml thì dùng nút **Nhập từ yml**.
+
 ## Phần mềm và cách tự nhận diện
 
 | Phần mềm | Repo (worktree `be/`, `fe/`) | Nhánh nhận MR | Nhận diện |

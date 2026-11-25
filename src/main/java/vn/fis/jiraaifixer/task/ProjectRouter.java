@@ -7,13 +7,12 @@ import java.util.Locale;
 
 import org.springframework.stereotype.Component;
 
-import vn.fis.jiraaifixer.config.AppProperties;
 import vn.fis.jiraaifixer.config.AppProperties.Project;
 import vn.fis.jiraaifixer.jira.JiraModels.IssueDetail;
 import vn.fis.jiraaifixer.jira.JiraModels.IssueSummary;
 
 /**
- * Xác định issue thuộc phần mềm (project) nào:
+ * Xác định issue thuộc phần mềm (project) nào trong cấu hình của profile đang dùng:
  * 1. Jira project key chỉ gắn với một phần mềm → chọn ngay.
  * 2. Chấm điểm từ khóa: Module = 3 điểm, tiêu đề = 2 điểm, Component/Label = 1 điểm.
  *    Component ở Jira này hay được dùng như mục chi phí/sản phẩm bàn giao nên kém tin cậy hơn tiêu đề.
@@ -28,22 +27,19 @@ public class ProjectRouter {
         }
     }
 
-    private final List<Project> projects;
-
-    public ProjectRouter(AppProperties props) {
-        this.projects = props.projects();
+    public Route route(List<Project> projects, IssueSummary i) {
+        return route(projects, i.projectKey(), i.module(), i.components(), i.labels(), i.summary());
     }
 
-    public Route route(IssueSummary i) {
-        return route(i.projectKey(), i.module(), i.components(), i.labels(), i.summary());
+    public Route route(List<Project> projects, IssueDetail i) {
+        return route(projects, i.projectKey(), i.module(), i.components(), i.labels(), i.summary());
     }
 
-    public Route route(IssueDetail i) {
-        return route(i.projectKey(), i.module(), i.components(), i.labels(), i.summary());
-    }
-
-    public Route route(String jiraProjectKey, String module, List<String> components, List<String> labels,
-                       String summary) {
+    public Route route(List<Project> projects, String jiraProjectKey, String module, List<String> components,
+                       List<String> labels, String summary) {
+        if (projects.isEmpty()) {
+            return Route.none("Profile chưa cấu hình phần mềm nào");
+        }
         List<Project> candidates = projects.stream()
                 .filter(p -> p.jiraProjects().stream().anyMatch(k -> k.equalsIgnoreCase(jiraProjectKey)))
                 .toList();
@@ -101,6 +97,9 @@ public class ProjectRouter {
             }
         }
         if (best == null) {
+            if (candidates.size() == 1) {
+                return new Route(candidates.getFirst().name(), "profile chỉ có một phần mềm");
+            }
             return Route.none("Không khớp từ khóa nào");
         }
         if (tie) {

@@ -91,7 +91,10 @@ function routeBadge(route, reason) {
 
 async function loadConfig() {
   state.config = await api('/config');
-  $('jql').value = state.config.defaultJql;
+  $('jql').value = state.config.defaultJql || '';
+  $('profileSelect').replaceChildren(...state.config.profiles.map((p) =>
+    el('option', { value: p.id, text: p.name, selected: p.id === state.config.profileId })));
+  $('profileSelect').value = state.config.profileId;
   const chip = $('claudeCli');
   if (state.config.claudeCli) {
     chip.textContent = 'Claude CLI: ' + state.config.claudeCli.split(/[\\/]/).slice(-4).join('/');
@@ -119,6 +122,30 @@ async function checkJira() {
 }
 
 // ------------------------------------------------------------------ issues
+
+async function switchProfile(id) {
+  try {
+    await api(`/profiles/${encodeURIComponent(id)}/activate`, { method: 'POST' });
+    state.selected.clear();
+    state.selectedKey = null;
+    state.typeFilter = 'ALL';
+    state.projectFilter = 'ALL';
+    $('issueDetail').replaceChildren(el('div', { class: 'empty', text: 'Chọn một issue ở danh sách bên trái.' }));
+    await loadConfig();
+    await checkJira();
+    await loadIssues();
+    toast('Đã chuyển sang dự án: ' + state.config.profileName);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function noProjectsHint() {
+  return state.config && !state.config.projects.length
+    ? el('div', { class: 'alert warn' }, 'Dự án này chưa cấu hình phần mềm/repo nào nên chưa giao Claude fix được. ',
+      el('a', { href: '/settings.html', text: 'Vào Cấu hình dự án' }))
+    : null;
+}
 
 async function loadIssues() {
   $('issueList').replaceChildren(el('div', { class: 'empty', text: 'Đang tải…' }));
@@ -172,11 +199,12 @@ function renderIssues() {
   const list = visibleIssues();
   $('issueCount').textContent = `(${list.length})`;
   updateSelectBar();
+  const hint = noProjectsHint();
   if (!list.length) {
-    $('issueList').replaceChildren(el('div', { class: 'empty', text: 'Không có issue nào khớp bộ lọc.' }));
+    $('issueList').replaceChildren(...[hint, el('div', { class: 'empty', text: 'Không có issue nào khớp bộ lọc.' })].filter(Boolean));
     return;
   }
-  $('issueList').replaceChildren(...list.map((i) => el('div', {
+  $('issueList').replaceChildren(...[hint].filter(Boolean), ...list.map((i) => el('div', {
     class: 'item' + (i.key === state.selectedKey ? ' selected' : ''),
     onclick: () => selectIssue(i.key),
   },
@@ -352,7 +380,7 @@ async function loadTasks() {
       el('span', { class: 'badge route', text: t.project }),
       el('span', { class: 'badge ' + taskBadge(t), text: t.stateLabel })),
     el('div', { class: 'title', text: t.issueSummary || '' }),
-    el('div', { class: 'sub', text: ['$' + t.costUsd.toFixed(2), fmt(t.createdAt), t.repos.filter((r) => r.mrUrl).length ? 'MR: ' + t.repos.filter((r) => r.mrUrl).map((r) => r.name).join(', ') : null].filter(Boolean).join(' · ') })))));
+    el('div', { class: 'sub', text: [t.profileName, '$' + t.costUsd.toFixed(2), fmt(t.createdAt), t.repos.filter((r) => r.mrUrl).length ? 'MR: ' + t.repos.filter((r) => r.mrUrl).map((r) => r.name).join(', ') : null].filter(Boolean).join(' · ') })))));
 }
 
 function taskBadge(t) {
@@ -569,6 +597,7 @@ $('chkAll').addEventListener('change', (e) => {
   renderIssues();
 });
 $('btnBatch').addEventListener('click', openBatch);
+$('profileSelect').addEventListener('change', (e) => switchProfile(e.target.value));
 $('batchDialog').addEventListener('close', () => { if ($('batchDialog').returnValue === 'default') submitBatch(); });
 $('btnDiff').addEventListener('click', loadDiff);
 $('btnChat').addEventListener('click', sendChat);

@@ -55,6 +55,9 @@ import vn.fis.jiraaifixer.git.MergeRequests;
 import vn.fis.jiraaifixer.jira.JiraClient;
 import vn.fis.jiraaifixer.jira.JiraModels.Attachment;
 import vn.fis.jiraaifixer.jira.JiraModels.IssueDetail;
+import vn.fis.jiraaifixer.jira.JiraSettings;
+import vn.fis.jiraaifixer.profile.Profile;
+import vn.fis.jiraaifixer.profile.ProfileService;
 import vn.fis.jiraaifixer.task.FixTask.RepoWork;
 import vn.fis.jiraaifixer.util.Texts;
 
@@ -88,17 +91,20 @@ public class FixTaskService {
     private final ClaudeCli claude;
     private final GitCli git;
     private final ProjectRouter router;
+    private final ProfileService profiles;
     private final Path workspaceDir;
     private final Semaphore claudeSlots;
     private final Map<String, FixTask> tasks = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
-    public FixTaskService(AppProperties props, JiraClient jira, ClaudeCli claude, GitCli git, ProjectRouter router) {
+    public FixTaskService(AppProperties props, JiraClient jira, ClaudeCli claude, GitCli git, ProjectRouter router,
+                          ProfileService profiles) {
         this.props = props;
         this.jira = jira;
         this.claude = claude;
         this.git = git;
         this.router = router;
+        this.profiles = profiles;
         this.workspaceDir = realDir(Path.of(props.workspace().dir()));
         this.claudeSlots = new Semaphore(Math.max(1, props.claude().maxParallel()));
     }
@@ -153,20 +159,22 @@ public class FixTaskService {
     public FixTask start(StartRequest req) {
         JiraClient.requireKey(req.issueKey());
         String model = ClaudeCli.validateModel(req.model());
+        Profile profile = profiles.active();
+        JiraSettings jiraSettings = profiles.jira(profile);
 
         IssueDetail issue = null;
         Project project;
         if (isBlank(req.project())) {
-            issue = jira.getIssue(req.issueKey());
-            ProjectRouter.Route route = router.route(issue);
+            issue = jira.getIssue(jiraSettings, req.issueKey());
+            ProjectRouter.Route route = router.route(profile.projects(), issue);
             if (route.project() == null) {
                 throw new IllegalArgumentException("Không tự xác định được phần mềm cho " + req.issueKey() + " ("
-                        + route.reason() + "), hãy chọn project bằng tay");
+                        + route.reason() + "), hãy chọn phần mềm bằng tay");
             }
-            project = props.project(route.project()).orElseThrow();
+            project = profile.project(route.project()).orElseThrow();
         } else {
-            project = props.project(req.project())
-                    .orElseThrow(() -> new IllegalArgumentException("Project không có trong cấu hình: " + req.project()));
+            project = profile.project(req.project()).orElseThrow(() -> new IllegalArgumentException(
+                    "Phần mềm " + req.project() + " không có trong profile \"" + profile.name() + "\""));
         }
         boolean duplicate = tasks.values().stream().anyMatch(t -> t.issueKey().equals(req.issueKey())
                 && t.projectName().equals(project.name()) && t.state().busy());
@@ -189,8 +197,8 @@ public class FixTaskService {
             }
         }
 
-        FixTask t = new FixTask(id, req.issueKey(), project.name(), project.title(), taskDir, repos, contextDirs,
-                model, req.instruction());
+        FixTask t = new FixTask(id, profile.id(), profile.name(), jiraSettings, req.issueKey(), project.name(),
+                project.title(), taskDir, repos, contextDirs, model, req.instruction());
         if (issue != null) {
             t.setIssue(issue);
         }
@@ -319,7 +327,7 @@ public class FixTaskService {
     private void pipeline(FixTask t) {
         try {
             t.setState(PULLING);
-            IssueDetail issue = t.issue() != null ? t.issue() : jira.getIssue(t.issueKey());
+            IssueDetail issue = t.issue() != null ? t.issue() : jira.getIssue(t.jira(), t.issueKey());
             t.setIssue(issue);
             t.log("Jira: " + issue.key() + " – " + issue.summary() + " (" + issue.comments().size() + " bình luận, "
                     + issue.attachments().size() + " file đính kèm)");
@@ -446,7 +454,7 @@ public class FixTaskService {
                 "-o", "merge_request.create",
                 "-o", "merge_request.target=" + r.targetBranch(),
                 "-o", "merge_request.title=" + mrTitle,
-                "-o", "merge_request.description=Jira: " + jira.browseUrl(t.issueKey()));
+                "-o", "merge_request.description=Jira: " + JiraClient.browseUrl(t.jira(), t.issueKey()));
         t.log("[" + r.name() + "] git push " + r.remote() + " " + r.branch() + " (tạo MR → " + r.targetBranch() + ")");
         GitCli.Result res = git.run(wt, GitCli.NETWORK, args);
         t.log(res.output().strip());
@@ -489,14 +497,25 @@ public class FixTaskService {
         }
     }
 
-    /** Cho phép Claude chạy lệnh git CHỈ ĐỌC trên từng repo: git -C be diff..., không có commit/push. */
+    /**
+     * Quy tắc allow theo từng repo của phiên: git CHỈ ĐỌC (git -C be diff..., không có commit/push) và lệnh
+     * kiểm tra build theo tên thư mục repo (npm run build --prefix fe, pnpm --dir fe run typecheck...).
+     */
     private static List<String> gitReadRules(FixTask t) {
-        List<String> rules = new ArrayList<>();
+        List<String> commands = new ArrayList<>();
         for (RepoWork r : t.repos()) {
             for (String cmd : GIT_READ_COMMANDS) {
-                rules.add("Bash(git -C " + r.name() + " " + cmd + ":*)");
-                rules.add("PowerShell(git -C " + r.name() + " " + cmd + ":*)");
+                commands.add("git -C " + r.name() + " " + cmd);
             }
+            commands.add("npm run build --prefix " + r.name());
+            for (String script : List.of("typecheck", "build", "test")) {
+                commands.add("pnpm --dir " + r.name() + " run " + script);
+            }
+        }
+        List<String> rules = new ArrayList<>();
+        for (String c : commands) {
+            rules.add("Bash(" + c + ":*)");
+            rules.add("PowerShell(" + c + ":*)");
         }
         return rules;
     }
@@ -535,7 +554,7 @@ public class FixTaskService {
                 continue;
             }
             try {
-                byte[] data = jira.download(a.contentUrl());
+                byte[] data = jira.download(t.jira(), a.contentUrl());
                 Files.createDirectories(t.attachmentDir());
                 Path file = t.attachmentDir().resolve(safeFileName(saved.size(), a.filename()));
                 Files.write(file, data);
@@ -687,7 +706,8 @@ public class FixTaskService {
         try {
             p = Path.of(r.path()).toRealPath();
         } catch (IOException e) {
-            throw new IllegalArgumentException("Không tìm thấy thư mục repo " + r.name() + ": " + r.path());
+            throw new IllegalArgumentException("Không tìm thấy thư mục repo " + r.name() + ": " + r.path()
+                    + " (chưa clone? Vào \"Cấu hình dự án\" để clone hoặc sửa đường dẫn)");
         }
         if (!Files.exists(p.resolve(".git"))) {
             throw new IllegalArgumentException("Không phải git repo: " + p);
