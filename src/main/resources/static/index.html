@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jira AI Fixer</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <strong>Jira AI Fixer</strong>
+    <span class="muted">Jira → Claude sửa &amp; review → GitLab MR</span>
+  </div>
+  <div class="topbar-right">
+    <span id="jiraUser" class="chip">Jira: đang kiểm tra…</span>
+    <span id="claudeCli" class="chip">Claude CLI: …</span>
+    <button id="btnCookie" class="btn small" type="button">Cookie Jira</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="col">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Issue <span id="issueCount" class="muted"></span></h2>
+        <button id="btnReload" class="btn small" type="button">Tải lại</button>
+      </div>
+      <details class="jql">
+        <summary>JQL</summary>
+        <textarea id="jql" rows="3" spellcheck="false"></textarea>
+        <div class="row">
+          <button id="btnApplyJql" class="btn small" type="button">Áp dụng</button>
+          <button id="btnResetJql" class="btn small ghost" type="button">Mặc định</button>
+        </div>
+      </details>
+      <div class="filter-label">Loại</div>
+      <div id="typeFilter" class="chips"></div>
+      <div class="filter-label">Phần mềm (tự nhận diện)</div>
+      <div id="projectFilter" class="chips"></div>
+
+      <div class="selectbar">
+        <label class="check"><input id="chkAll" type="checkbox"> Chọn tất cả đang hiển thị</label>
+        <button id="btnBatch" class="btn small primary" type="button" disabled>Giao Claude fix (0)</button>
+      </div>
+      <div id="issueList" class="list"><div class="empty">Đang tải…</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Phiên xử lý</h2></div>
+      <div id="taskList" class="list"><div class="empty">Chưa có phiên nào.</div></div>
+    </div>
+  </section>
+
+  <section class="col">
+    <div id="issueDetail" class="panel">
+      <div class="empty">Chọn một issue ở danh sách bên trái, hoặc tick nhiều issue rồi bấm "Giao Claude fix".</div>
+    </div>
+
+    <div id="taskPanel" class="panel hidden">
+      <div class="panel-head">
+        <h2 id="taskTitle"></h2>
+        <div class="row">
+          <button id="btnCancel" class="btn small danger" type="button">Hủy</button>
+          <button id="btnDiscard" class="btn small ghost" type="button">Xóa worktree</button>
+        </div>
+      </div>
+      <div id="taskMeta" class="meta"></div>
+      <div id="taskRepos" class="repos"></div>
+      <ol id="steps" class="steps"></ol>
+      <div id="taskError" class="alert hidden"></div>
+      <div id="taskWarnings" class="alert warn hidden"></div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="log" type="button">Log</button>
+        <button class="tab" data-tab="diff" type="button">Diff</button>
+        <button class="tab" data-tab="summary" type="button">Tóm tắt</button>
+      </div>
+      <pre id="tab-log" class="tabpane log"></pre>
+      <div id="tab-diff" class="tabpane hidden">
+        <div class="row"><button id="btnDiff" class="btn small" type="button">Tải lại diff</button></div>
+        <pre id="diff" class="diff"></pre>
+      </div>
+      <div id="tab-summary" class="tabpane hidden">
+        <h3>Claude – sửa code</h3>
+        <pre id="coderSummary" class="summary"></pre>
+        <h3>Claude – review</h3>
+        <pre id="reviewSummary" class="summary"></pre>
+      </div>
+
+      <div class="chat">
+        <textarea id="chatInput" rows="2" placeholder="Nhắn thêm cho Claude (vd: đổi cách xử lý, sửa thêm chỗ…) – Ctrl+Enter để gửi"></textarea>
+        <button id="btnChat" class="btn" type="button">Gửi cho Claude</button>
+      </div>
+
+      <div class="push">
+        <label>Commit message
+          <input id="commitMsg" type="text">
+        </label>
+        <label>Tiêu đề merge request
+          <input id="mrTitle" type="text">
+        </label>
+        <button id="btnPush" class="btn primary" type="button">Commit, push &amp; tạo MR</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="cookieDialog">
+  <form method="dialog" class="dialog">
+    <h3>Cập nhật phiên Jira</h3>
+    <p class="muted">Dán cookie (<code>JSESSIONID=…; atlassian.xsrf.token=…</code>), header <code>Cookie: …</code>,
+      hoặc nguyên lệnh curl copy từ trình duyệt. Chỉ lưu trong bộ nhớ của app, mất khi tắt app.</p>
+    <textarea id="cookieInput" rows="5" spellcheck="false"></textarea>
+    <div class="row end">
+      <button value="cancel" class="btn ghost">Đóng</button>
+      <button value="default" class="btn primary">Lưu</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="batchDialog">
+  <form method="dialog" class="dialog">
+    <h3>Giao Claude fix <span id="batchCount"></span> issue</h3>
+    <p class="muted">Mỗi issue được tự gán vào phần mềm (đổi được ở cột bên phải). Claude làm trên worktree của cả BE và FE
+      của phần mềm đó và tự xác định cần sửa ở đâu. Mỗi issue là một phiên riêng; bạn duyệt diff từng phiên rồi mới push.</p>
+    <div id="batchRows" class="batch-rows"></div>
+    <div class="form">
+      <label>Model Claude <select id="batchModel"></select></label>
+      <label class="wide">Chỉ dẫn chung (tùy chọn) <textarea id="batchInstruction" rows="2"></textarea></label>
+    </div>
+    <div class="row end">
+      <button value="cancel" class="btn ghost">Đóng</button>
+      <button value="default" class="btn primary">Bắt đầu</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

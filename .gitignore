@@ -1,0 +1,8 @@
+target/
+workspaces/
+*.log
+.idea/
+.vscode/
+*.iml
+# cấu hình cá nhân (mật khẩu, cookie) – không commit
+application-local.yml

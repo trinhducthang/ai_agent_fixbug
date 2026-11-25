@@ -1,0 +1,126 @@
+server:
+  # Chỉ nghe trên máy local: app chạy Claude với quyền sửa code và giữ phiên Jira của bạn.
+  address: 127.0.0.1
+  port: ${PORT:8099}
+
+spring:
+  application:
+    name: jira-ai-fixer
+  config:
+    # File cấu hình cá nhân (mật khẩu, cookie...) đặt cạnh nơi chạy app, đã có trong .gitignore.
+    import: optional:file:./application-local.yml
+
+app:
+  jira:
+    base-url: https://jira.fis.com.vn
+    # Cách 1: user/password Jira (Basic auth) qua biến môi trường JIRA_USERNAME/JIRA_PASSWORD,
+    # hoặc khai báo trong ./application-local.yml (không commit). KHÔNG ghi mật khẩu vào file này.
+    username: ${JIRA_USERNAME:}
+    password: ${JIRA_PASSWORD:}
+    # Cách 2: cookie phiên (JSESSIONID=...; atlassian.xsrf.token=...). Có thể dán trên giao diện.
+    # Cookie dán trên giao diện được ưu tiên hơn Basic auth và chỉ giữ trong bộ nhớ.
+    cookie: ${JIRA_COOKIE:}
+    default-jql: status in (Open, Reopened, "In Progress") AND assignee = currentUser() ORDER BY priority DESC, updated DESC
+    # Custom field "Module" của Jira FIS (vd: "2. PM Kiểm tra rà soát") – dùng để tự xác định phần mềm.
+    module-field: customfield_10700
+    max-results: 100
+    max-attachments: 10
+    max-attachment-mb: 5
+
+  claude:
+    # Để trống: tự dò claude.exe trong PATH, ~/.local/bin, rồi extension VS Code (bản mới nhất).
+    cli-path: ${CLAUDE_CLI_PATH:}
+    # Để trống: dùng model mặc định của tài khoản Claude đang đăng nhập. Ví dụ: opus, sonnet, haiku.
+    model: ${CLAUDE_MODEL:}
+    # Trần chi phí ước tính cho MỖI lần gọi Claude (USD). 0 = không giới hạn.
+    max-budget-usd: 10
+    # Bộ tool built-in Claude được dùng (không có WebSearch/WebFetch/agent con).
+    tools: Read,Edit,Write,Glob,Grep,Bash,PowerShell
+    # Lệnh được tự động cho phép. Mọi lệnh khác bị từ chối (chế độ headless không hỏi lại).
+    # App tự thêm lệnh git CHỈ ĐỌC theo từng repo (git -C be diff/log/status/show/blame).
+    # Không có git commit/push/checkout/reset: app tự làm bước đó sau khi bạn duyệt diff.
+    allowed-tools: >-
+      Read,Edit,Write,Glob,Grep,
+      Bash(mvn:*),Bash(npm run build:*),Bash(npx tsc:*),
+      Bash(pnpm --dir fe run typecheck:*),Bash(pnpm --dir fe run build:*),Bash(pnpm --dir fe run test:*),
+      PowerShell(mvn:*),PowerShell(npm run build:*),PowerShell(npx tsc:*),
+      PowerShell(pnpm --dir fe run typecheck:*),PowerShell(pnpm --dir fe run build:*),PowerShell(pnpm --dir fe run test:*)
+    review-enabled: true
+    # Số phiên Claude chạy song song tối đa.
+    max-parallel: 2
+
+  workspace:
+    # Nơi tạo git worktree cho từng issue (không đụng vào thư mục làm việc chính của bạn).
+    dir: ./workspaces
+    branch-pattern: bugfix/{key}
+
+  # Mỗi phần mềm gồm các repo (worktree đặt tại <thư mục phiên>/<name>). Issue được tự gán vào phần mềm theo:
+  #   1) jira-projects: key Jira project chỉ thuộc phần mềm này
+  #   2) keywords: khớp trong Module/Component/Label (3 điểm) hoặc tiêu đề issue (1 điểm), điểm cao nhất thắng
+  # shared-dirs: thư mục dùng chung với repo gốc qua junction để build được mà không phải cài lại dependency.
+  projects:
+    - name: qttt
+      title: Phần mềm Quản trị nền tảng số pháp luật Việt Nam
+      keywords: [qttt, quản trị nền tảng số, pm quản trị]
+      repos:
+        - name: be
+          path: F:/qttt/btp_ntsplvn_qttt_be
+          target-branch: develop
+          verify-hint: "`mvn -q -o compile -f be/pom.xml`"
+        - name: fe
+          path: F:/qttt/btp_ntsplvn_qttt_fe
+          target-branch: develop
+          verify-hint: "`npm run build --prefix fe` (eslint của repo đang lỗi nên không dựa vào lint)"
+          shared-dirs: [node_modules]
+
+    - name: ktrs
+      title: Phần mềm hỗ trợ kiểm tra, rà soát VBQPPL
+      keywords: [ktrs, kiểm tra rà soát, kiểm tra văn bản, hệ thống hóa, rà soát thường xuyên, pm kiểm tra rà soát]
+      repos:
+        - name: be
+          path: F:/ktrs/btp-ntsplvn-ktrs-be
+          target-branch: dev
+          verify-hint: "`mvn -q -o compile -f be/pom.xml`"
+        - name: fe
+          path: F:/ktrs/btp_ntsplvn_ktrs_fe
+          target-branch: main
+          verify-hint: "`npm run build --prefix fe` (tsc -b && vite build)"
+          shared-dirs: [node_modules]
+
+    - name: tdth
+      title: Phần mềm hỗ trợ theo dõi thi hành VBQPPL
+      keywords: [tdth, theo dõi thi hành, tổ chức thi hành, pm tổ chức thi hành]
+      repos:
+        - name: be
+          path: F:/tdth/btp_ntsplvn_tdth_be
+          target-branch: develop
+          verify-hint: "`mvn -q -o compile -f be/pom.xml`"
+        - name: fe
+          path: F:/tdth/btp_ntsplvn_tdth_fe
+          target-branch: develop
+          verify-hint: "`npm run build --prefix fe` (tsc -b && vite build)"
+          shared-dirs: [node_modules]
+
+    - name: bpbd
+      title: Hệ thống Giao dịch bảo đảm & Bồi thường nhà nước (S7)
+      jira-projects: [BTP_GDBD_S7_2026_PM]
+      keywords: [btnn, gdbđ, gdbd, bồi thường nhà nước, giao dịch bảo đảm]
+      # Repo tài liệu (SRS, test, thiết kế, mockup) – Claude chỉ đọc để đối chiếu nghiệp vụ.
+      context-dirs: [F:/bpbd_s7/btp_bpbd_ui]
+      repos:
+        - name: be
+          path: F:/bpbd_s7/btp_bpbd_be
+          target-branch: develop
+          verify-hint: "`mvn -q -o compile -f be/pom.xml`"
+        - name: fe
+          path: F:/bpbd_s7/btp_bpbd_fe
+          target-branch: develop
+          verify-hint: "`pnpm --dir fe run typecheck` (monorepo pnpm: apps/admin, apps/portal, packages/*)"
+          shared-dirs:
+            - node_modules
+            - apps/admin/node_modules
+            - apps/portal/node_modules
+            - packages/api-client/node_modules
+            - packages/i18n/node_modules
+            - packages/signing/node_modules
+            - packages/ui-kit/node_modules
